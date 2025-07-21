@@ -1,7 +1,7 @@
 
 import math
 import numpy as np
-class ANN:
+class ANN():
     def __init__(self):
         self.weightdict = {}
         self.biasdict = {}
@@ -453,7 +453,7 @@ class TransformerDecoder():
         delta=self.layernorm_backward(deltadecoder,normstats[-3])
         delta=self.multiheadattentionbackward(delta)
         return deltaencoder,deltadecoder
-class encoder_decoder:
+class encoder_decoder():
     def __init__(self, input_matrix, output_matrix):
         self.input_matrix = input_matrix
         self.output_matrix = output_matrix
