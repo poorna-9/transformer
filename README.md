@@ -1,8 +1,8 @@
-# 🧠 NeuroLite-Transformer
+# NeuroLite-Transformer
 
 A complete Transformer architecture built from scratch using only **NumPy** — no TensorFlow, PyTorch, or external deep learning frameworks. Designed to demystify the internals of attention mechanisms, this project is ideal for learning, experimentation, and custom research.
 
-## 🚀 Features
+## Features
 
 - Implements full **Transformer Encoder and Decoder** architecture.
 - All core components from scratch:
@@ -19,7 +19,7 @@ A complete Transformer architecture built from scratch using only **NumPy** — 
   - **Code Generation**
 - Built entirely using **NumPy**.
 
-## 🔧 Example Usage
+##  Example Usage
 
 ```python
 from neuro_lite_transformer import Transformer, Tokenizer, CrossEntropyLoss
