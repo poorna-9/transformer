@@ -12,7 +12,7 @@ class ANN():
         self.initmethod = 'he'
         self.loss = 'mse'
         self.optimizer = 'adam'
-        self.opt = Optimizer()
+        self.optimizers = {}
 
     def initializeweight(self, shape):
         fan_in = shape[0]
@@ -35,6 +35,7 @@ class ANN():
 
         self.weightdict[self.layercount] = self.initializeweight((self.neurons[-2], self.neurons[-1]))
         self.biasdict[self.layercount] = np.zeros((1, self.neurons[-1]))
+        self.optimizers[self.layercount] = Optimizer()
         self.layercount += 1
 
     def activation(self, x, activation):
@@ -94,26 +95,37 @@ class ANN():
             dw = np.dot(self.activationvalues[j].T, delta) / x.shape[0]
             db = np.sum(delta, axis=0, keepdims=True) / x.shape[0]
 
-            self.weightdict[j], self.biasdict[j] = self.opt.optimizer(
-                self.optimizer, self.weightdict[j], dw, self.biasdict[j], db, learning_rate
-            )
+            self.weightdict[j], self.biasdict[j] = self.optimizers[j].optimizer(
+                        self.optimizer,
+                        self.weightdict[j],
+                        dw,
+                        self.biasdict[j],
+                        db,
+                        learning_rate
+                    )
 
             if j > 0:
                 delta = np.dot(delta, self.weightdict[j].T)
     def backprop_from_output(self, dy, learning_rate=0.001):
         delta = dy.copy()
         for j in range(self.layercount - 1, -1, -1):
-            delta *= self.activationderivative(self.activationvalues[j + 1], self.activations[j])
+            delta *= self.activationderivative(
+                self.activationvalues[j + 1],
+                self.activations[j]
+            )
             dw = np.dot(self.activationvalues[j].T, delta) / delta.shape[0]
             db = np.sum(delta, axis=0, keepdims=True) / delta.shape[0]
-    
-            self.weightdict[j], self.biasdict[j] = self.opt.optimizer(
-                self.optimizer, self.weightdict[j], dw, self.biasdict[j], db, learning_rate=0.001
+            prev_delta = np.dot(delta, self.weightdict[j].T)
+            self.weightdict[j], self.biasdict[j] = self.optimizers[j].optimizer(
+                self.optimizer,
+                self.weightdict[j],
+                dw,
+                self.biasdict[j],
+                db,
+                learning_rate
             )
-    
-            if j > 0:
-                delta = np.dot(delta, self.weightdict[j].T)
-        return delta  
+            delta = prev_delta
+        return delta
 
     def fit(self, x, y, epochs, learning_rate):
 
@@ -166,6 +178,8 @@ class TransformerEncoder():
         self.input_matrix = input_matrix
         self.d_model = input_matrix.shape[1]
         self.num_heads = 8
+        if self.d_model % self.num_heads != 0:
+          raise ValueError("d_model must be divisible by num_heads")
         self.d_k = self.d_model // self.num_heads
         self.d_v = self.d_k
         self.initialize_projection_weights()
@@ -175,11 +189,27 @@ class TransformerEncoder():
         self.key=[]
         self.value=[]
         self.attn=[]
+    def update_attention_weight(self, opt, weight, dweight, learning_rate=0.001):
+        dummy_b = np.zeros_like(weight)
+        dummy_db = np.zeros_like(dweight)
 
+        weight, _ = opt.optimizer(
+            'adam',
+            weight,
+            dweight,
+            dummy_b,
+            dummy_db,
+            learning_rate
+        )
+        return weight
     def initialize_projection_weights(self):
         self.Wq_list = [self.init_weight((self.d_model, self.d_k)) for _ in range(self.num_heads)]
         self.Wk_list = [self.init_weight((self.d_model, self.d_k)) for _ in range(self.num_heads)]
         self.Wv_list = [self.init_weight((self.d_model, self.d_v)) for _ in range(self.num_heads)]
+
+        self.Wq_optimizers = [Optimizer() for _ in range(self.num_heads)]
+        self.Wk_optimizers = [Optimizer() for _ in range(self.num_heads)]
+        self.Wv_optimizers = [Optimizer() for _ in range(self.num_heads)]
 
     def init_weight(self, shape):
         return np.random.randn(*shape) * np.sqrt(2 / shape[0])
@@ -189,7 +219,7 @@ class TransformerEncoder():
         pos_enc = np.zeros((seq_len, d_model))
         for pos in range(seq_len):
             for i in range(0, d_model, 2):
-                angle = pos / (10000 ** ((2 * i) / d_model))
+                angle = pos / (10000 ** (i / d_model))
                 pos_enc[pos, i] = np.sin(angle)
                 if i + 1 < d_model:
                     pos_enc[pos, i + 1] = np.cos(angle)
@@ -222,16 +252,21 @@ class TransformerEncoder():
         return np.dot(attention_weights, V),attention_weights
 
     def multihead_attention(self, Q_input, K_input, V_input):
-        Q_input += self.positional_encoding(Q_input)
+        Q_input = Q_input + self.positional_encoding(Q_input)
+        self.attn_input = Q_input
+        self.query = []
+        self.key = []
+        self.value = []
+        self.attn = []
         outputs = []
         for i in range(self.num_heads):
-            Q = np.dot(Q_input, self.Wq_list[i])
-            K = np.dot(K_input, self.Wk_list[i])
-            V = np.dot(V_input, self.Wv_list[i])
+            Q = np.dot(self.attn_input, self.Wq_list[i])
+            K = np.dot(self.attn_input, self.Wk_list[i])
+            V = np.dot(self.attn_input, self.Wv_list[i])
             self.query.append(Q)
             self.key.append(K)
             self.value.append(V)
-            head_output,attn_weights== self.single_head_attention(Q, K, V)
+            head_output, attn_weights = self.single_head_attention(Q, K, V)
             self.attn.append(attn_weights)
             outputs.append(head_output)
         concatenated = np.concatenate(outputs, axis=1)
@@ -239,8 +274,9 @@ class TransformerEncoder():
         return self.layer_normalization(residual)
 
     def feed_forward_network(self, x):
-        self.ann.add(2048, "relu", inputshape=x.shape)
-        self.ann.add(self.d_model, "linear")
+        if self.ann.layercount == 0:
+            self.ann.add(2048, "relu", inputshape=x.shape)
+            self.ann.add(self.d_model, "linear")
         ffn_output = self.ann.forward(x)
         residual = x + ffn_output
         return self.layer_normalization(residual)
@@ -250,38 +286,81 @@ class TransformerEncoder():
                                                self.input_matrix,
                                                self.input_matrix)
         return self.feed_forward_network(attn_output)
-    def multiheadattentionbackward(self, delta):
-        for h in range(self.heads):
-            dels = delta[:,h*self.d_k:(h+1)*self.d_k]
-            Q=self.query[h]
-            K=self.key[h]
-            V=self.value[h]
-            A=self.attn[h]
-            dV=np.dot(A.T,dels)
-            dwv=np.dot(dV,self.input_matrix.T)
-            d_scores=np.dot(dels,V.T)
-            softmax_grad=np.diagflat(A)-np.dot(A,A.T)
-            d_attn_scores=np.dot(softmax_grad,d_scores)/np.sqrt(self.d_k)
-            dQ=np.dot(d_attn_scores,K)
-            dK=np.dot(d_attn_scores.T,Q)
-            dwq=np.dot(dQ,self.input_matrix.T)
-            dwk=np.dot(dK,self.input_matrix.T)
+    def multiheadattentionbackward(self, delta, learning_rate=0.001):
+        total_dx = np.zeros_like(self.attn_input)
 
-            self.optimizer(self.Wq_list[h],dwq,learning_rate=0.001)
-            self.optimizer(self.Wk_list[h],dwk,learning_rate=0.001)
-            self.optimizer(self.Wv_list[h],dwv,learning_rate=0.001)
-    def backward(self,delta):
-        delta=self.layernorm_backward(delta,self.norm_stats[-1])
-        delta=self.ann.backprop_from_output(delta)
-        delta=self.layernorm_backward(delta,self.norm_stats[-2])
-        self.multihead_attentionbackward(delta)
+        for h in range(self.num_heads):
+            dels = delta[:, h * self.d_k : (h + 1) * self.d_k]
+
+            Q = self.query[h]
+            K = self.key[h]
+            V = self.value[h]
+            A = self.attn[h]
+
+            dV = np.dot(A.T, dels)
+
+            dA = np.dot(dels, V.T)
+            d_attn_scores = A * (dA - np.sum(dA * A, axis=1, keepdims=True))
+            d_attn_scores = d_attn_scores / np.sqrt(self.d_k)
+
+            dQ = np.dot(d_attn_scores, K)
+            dK = np.dot(d_attn_scores.T, Q)
+
+            dwq = np.dot(self.attn_input.T, dQ)
+            dwk = np.dot(self.attn_input.T, dK)
+            dwv = np.dot(self.attn_input.T, dV)
+
+            dx = (
+                np.dot(dQ, self.Wq_list[h].T)
+                + np.dot(dK, self.Wk_list[h].T)
+                + np.dot(dV, self.Wv_list[h].T)
+            )
+
+            total_dx += dx
+
+            self.Wq_list[h] = self.update_attention_weight(
+                self.Wq_optimizers[h],
+                self.Wq_list[h],
+                dwq,
+                learning_rate
+            )
+
+            self.Wk_list[h] = self.update_attention_weight(
+                self.Wk_optimizers[h],
+                self.Wk_list[h],
+                dwk,
+                learning_rate
+            )
+
+            self.Wv_list[h] = self.update_attention_weight(
+                self.Wv_optimizers[h],
+                self.Wv_list[h],
+                dwv,
+                learning_rate
+            )
+
+        return total_dx
+    def backward(self, delta):
+        x, mean, D, std = self.norm_stats[-1]
+        delta = self.layernorm_backward(delta, x, mean, D, std)
+        direct_delta = delta
+        ffn_delta = self.ann.backprop_from_output(delta)
+        delta = direct_delta + ffn_delta
+        x, mean, D, std = self.norm_stats[-2]
+        delta = self.layernorm_backward(delta, x, mean, D, std)
+        direct_delta = delta
+        attn_delta = self.multiheadattentionbackward(delta)
+        delta = direct_delta + attn_delta
         return delta
+    
 class TransformerDecoder():
     def __init__(self, output_matrix, encoder_output):
         self.output_matrix = output_matrix
         self.encoder_output = encoder_output
         self.d_model = output_matrix.shape[1]
         self.num_heads = 8
+        if self.d_model % self.num_heads != 0:
+           raise ValueError("d_model must be divisible by num_heads")
         self.d_k = self.d_model // self.num_heads
         self.d_v = self.d_k
         self.initialize_decoder_weights()
@@ -307,12 +386,33 @@ class TransformerDecoder():
         self.wk_cross = [self.init_weight((self.d_model, self.d_k)) for _ in range(self.num_heads)]
         self.wv_cross = [self.init_weight((self.d_model, self.d_v)) for _ in range(self.num_heads)]
 
+        self.wq_masked_optimizers = [Optimizer() for _ in range(self.num_heads)]
+        self.wk_masked_optimizers = [Optimizer() for _ in range(self.num_heads)]
+        self.wv_masked_optimizers = [Optimizer() for _ in range(self.num_heads)]
+
+        self.wq_cross_optimizers = [Optimizer() for _ in range(self.num_heads)]
+        self.wk_cross_optimizers = [Optimizer() for _ in range(self.num_heads)]
+        self.wv_cross_optimizers = [Optimizer() for _ in range(self.num_heads)]
+
+    def update_attention_weight(self, opt, weight, dweight, learning_rate=0.001):
+        dummy_b = np.zeros_like(weight)
+        dummy_db = np.zeros_like(dweight)
+        weight, _ = opt.optimizer(
+                'adam',
+                weight,
+                dweight,
+                dummy_b,
+                dummy_db,
+                learning_rate
+        )
+        return weight
+
     def positional_encoding(self, matrix):
         seq_len, d_model = matrix.shape
         pos_enc = np.zeros((seq_len, d_model))
         for pos in range(seq_len):
             for i in range(0, d_model, 2):
-                angle = pos / (10000 ** ((2 * i) / d_model))
+                angle = pos / (10000 ** (i / d_model))
                 pos_enc[pos, i] = np.sin(angle)
                 if i + 1 < d_model:
                     pos_enc[pos, i + 1] = np.cos(angle)
@@ -329,19 +429,28 @@ class TransformerDecoder():
         self.norm_stats.append((x.copy(), mean, D, std))
         return (x - mean) / (std + eps)
 
-    def single_head_attention(self, Q, K, V):
+    def single_head_attention(self, Q, K, V, masked=False):
         scores = np.dot(Q, K.T) / np.sqrt(self.d_k)
+        if masked:
+            seq_len = scores.shape[0]
+            mask = np.triu(np.ones((seq_len, seq_len)), k=1)
+            scores = np.where(mask == 1, -1e9, scores)
         attn_weights = self.softmax(scores)
-        return np.dot(attn_weights, V),attn_weights
+        return np.dot(attn_weights, V), attn_weights
 
     def masked_multihead_attention(self, Q_input, K_input, V_input):
-        Q_input += self.positional_encoding(Q_input)
+        Q_input = Q_input + self.positional_encoding(Q_input)
+        self.mask_input = Q_input
+        self.maskquery = []
+        self.maskkey = []
+        self.maskvalue = []
+        self.maskattn = []
         outputs = []
         for i in range(self.num_heads):
-            Q = np.dot(Q_input, self.wq_masked[i])
-            K = np.dot(K_input, self.wk_masked[i])
-            V = np.dot(V_input, self.wv_masked[i])
-            head_output,attnweight = self.single_head_attention(Q, K, V)
+            Q = np.dot(self.mask_input, self.wq_masked[i])
+            K = np.dot(self.mask_input, self.wk_masked[i])
+            V = np.dot(self.mask_input, self.wv_masked[i])
+            head_output, attnweight = self.single_head_attention(Q, K, V, masked=True)
             self.maskquery.append(Q)
             self.maskkey.append(K)
             self.maskvalue.append(V)
@@ -352,13 +461,18 @@ class TransformerDecoder():
         return self.layer_normalization(residual)
 
     def cross_multihead_attention(self, Q_input, K_input, V_input):
-        Q_input += self.positional_encoding(Q_input)
+        Q_input = Q_input + self.positional_encoding(Q_input)
+        self.cross_input = Q_input
+        self.crossquery = []
+        self.crosskey = []
+        self.crossvalue = []
+        self.crossattn = []
         outputs = []
         for i in range(self.num_heads):
-            Q = np.dot(Q_input, self.wq_cross[i])
+            Q = np.dot(self.cross_input, self.wq_cross[i])
             K = np.dot(K_input, self.wk_cross[i])
             V = np.dot(V_input, self.wv_cross[i])
-            head_output,attnweight = self.single_head_attention(Q, K, V)
+            head_output, attnweight = self.single_head_attention(Q, K, V, masked=False)
             self.crossquery.append(Q)
             self.crosskey.append(K)
             self.crossvalue.append(V)
@@ -369,8 +483,10 @@ class TransformerDecoder():
         return self.layer_normalization(residual)
 
     def feed_forward_network(self, x):
-        self.ann.add(2048, "relu", inputshape=x.shape)
-        self.ann.add(self.d_model, "linear")
+        if self.ann.layercount == 0:
+            self.ann.add(2048, "relu", inputshape=x.shape)
+            self.ann.add(self.d_model, "linear")
+
         ffn_output = self.ann.forward(x)
         residual = x + ffn_output
         return self.layer_normalization(residual)
@@ -391,74 +507,120 @@ class TransformerDecoder():
         x = self.cross_multihead_attention(x, self.encoder_output, self.encoder_output)
         return self.feed_forward_network(x)
 
-    def crossattentionbackward(self, delta):
-       total_dx = np.zeros_like(self.output_matrix) 
-       total_dy = np.zeros_like(self.encoder_output)
-       for h in range(self.num_heads):
-        dels = delta[:, h * self.d_k : (h + 1) * self.d_k]  
-        Q = self.crossquery[h] 
-        K = self.crosskey[h]
-        V = self.crossvalue[h]
-        A = self.crossattn[h] 
+    def crossattentionbackward(self, delta, learning_rate=0.001):
+        total_dx = np.zeros_like(self.cross_input)
+        total_dy = np.zeros_like(self.encoder_output)
 
-        dV = np.dot(A.T, dels)
-        dwv = np.dot(dV, self.encoder_output.T) 
+        for h in range(self.num_heads):
+            dels = delta[:, h * self.d_k : (h + 1) * self.d_k]
+            Q = self.crossquery[h]
+            K = self.crosskey[h]
+            V = self.crossvalue[h]
+            A = self.crossattn[h]
+            dV = np.dot(A.T, dels)
+            dA = np.dot(dels, V.T)
+            d_attn_scores = A * (dA - np.sum(dA * A, axis=1, keepdims=True))
+            d_attn_scores = d_attn_scores / np.sqrt(self.d_k)
+            dQ = np.dot(d_attn_scores, K)
+            dK = np.dot(d_attn_scores.T, Q)
+            dwq = np.dot(self.cross_input.T, dQ)
+            dwk = np.dot(self.encoder_output.T, dK)
+            dwv = np.dot(self.encoder_output.T, dV)
+            dx = np.dot(dQ, self.wq_cross[h].T)
+            dy = np.dot(dK, self.wk_cross[h].T) + np.dot(dV, self.wv_cross[h].T)
+            total_dx += dx
+            total_dy += dy
+            self.wq_cross[h] = self.update_attention_weight(
+                self.wq_cross_optimizers[h],
+                self.wq_cross[h],
+                dwq,
+                learning_rate
+            )
+            self.wk_cross[h] = self.update_attention_weight(
+                self.wk_cross_optimizers[h],
+                self.wk_cross[h],
+                dwk,
+                learning_rate
+            )
+            self.wv_cross[h] = self.update_attention_weight(
+                self.wv_cross_optimizers[h],
+                self.wv_cross[h],
+                dwv,
+                learning_rate
+            )
+        return total_dx, total_dy
+    
+    def multiheadattentionbackward(self, delta, learning_rate=0.001):
+        total_dx = np.zeros_like(self.mask_input)
+        for h in range(self.num_heads):
+            dels = delta[:, h * self.d_k : (h + 1) * self.d_k]
+            Q = self.maskquery[h]
+            K = self.maskkey[h]
+            V = self.maskvalue[h]
+            A = self.maskattn[h]
+            dV = np.dot(A.T, dels)
+            dA = np.dot(dels, V.T)
+            d_attn_scores = A * (dA - np.sum(dA * A, axis=1, keepdims=True))
+            d_attn_scores = d_attn_scores / np.sqrt(self.d_k)
+            dQ = np.dot(d_attn_scores, K)
+            dK = np.dot(d_attn_scores.T, Q)
+            dwq = np.dot(self.mask_input.T, dQ)
+            dwk = np.dot(self.mask_input.T, dK)
+            dwv = np.dot(self.mask_input.T, dV)
+            dx = (
+                np.dot(dQ, self.wq_masked[h].T)
+                + np.dot(dK, self.wk_masked[h].T)
+                + np.dot(dV, self.wv_masked[h].T)
+            )
+            total_dx += dx
+            self.wq_masked[h] = self.update_attention_weight(
+                self.wq_masked_optimizers[h],
+                self.wq_masked[h],
+                dwq,
+                learning_rate
+            )
+            self.wk_masked[h] = self.update_attention_weight(
+                self.wk_masked_optimizers[h],
+                self.wk_masked[h],
+                dwk,
+                learning_rate
+            )
+            self.wv_masked[h] = self.update_attention_weight(
+                self.wv_masked_optimizers[h],
+                self.wv_masked[h],
+                dwv,
+                learning_rate
+            )
+        return total_dx
 
-        d_scores = np.dot(dels, V.T)
-        softmax_grad = np.diagflat(A) - np.dot(A, A.T)
-        d_attn_scores = np.dot(softmax_grad, d_scores) / np.sqrt(self.d_k)
-
-        dQ = np.dot(d_attn_scores, K)
-        dK = np.dot(d_attn_scores.T, Q)
-
-        dwq = np.dot(dQ, self.output_matrix.T)
-        dwk = np.dot(dK, self.encoder_output.T)
-        dx = np.dot(dQ, self.wq_cross[h])  
-        dy = np.dot(dK,self.wk_cross[h])+np.dot(dV,self.wv_cross[h])
-        total_dx += dx
-        total_dy += dy
-        self.optimizer(self.wq_cross[h], dwq, learning_rate=0.001)
-        self.optimizer(self.wk_cross[h], dwk, learning_rate=0.001)
-        self.optimizer(self.wv_cross[h], dwv, learning_rate=0.001)
-       return total_dx,total_dy
-    def multiheadattentionbackward(self, delta):
-    for h in range(self.num_heads):
-        dels = delta[:, h * self.d_k : (h + 1) * self.d_k]  
-
-        Q = self.maskquery[h]       
-        K = self.maskkey[h]        
-        V = self.maskvalue[h]       
-        A = self.maskattn[h]        
-        dV = np.dot(A.T, dels)  
-        dwv = np.dot(dV.T, self.encoder_output)  
-
-        d_scores = np.dot(dels, V.T)
-        softmax_grad = np.diagflat(A) - np.dot(A, A.T)  
-        d_attn_scores = np.dot(softmax_grad, d_scores) / np.sqrt(self.d_k)  
-        dQ = np.dot(d_attn_scores, K)  
-        dK = np.dot(d_attn_scores.T, Q) 
-
-        dwq = np.dot(dQ.T, self.encoder_output)
-        dwk = np.dot(dK.T, self.encoder_output)  
-        dx = np.dot(dQ, self.wq_masked[h]) + np.dot(dK, self.wk_masked[h]) + np.dot(dV, self.wv_masked[h])
-        self.optimizer(self.wq_masked[h], dwq, learning_rate=0.001)
-        self.optimizer(self.wk_masked[h], dwk, learning_rate=0.001)
-        self.optimizer(self.wv_masked[h], dwv, learning_rate=0.001)
-
-    def backward(self, delta,normstats):
-        delta=self.layernorm_backward(delta,normstats[-1])
-        delta=self.ann.backprop_from_output(delta)
-        delta=self.layernorm_backward(delta,normstats[-2])
-        deltadecoder,deltaencoder=self.crossattentionbackward(delta)
-        delta=self.layernorm_backward(deltadecoder,normstats[-3])
-        delta=self.multiheadattentionbackward(delta)
-        return deltaencoder,deltadecoder
+    def backward(self, delta):
+        x, mean, D, std = self.norm_stats[-1]
+        delta = self.layernorm_backward(delta, x, mean, D, std)
+        direct_delta = delta
+        ffn_delta = self.ann.backprop_from_output(delta)
+        delta = direct_delta + ffn_delta
+        x, mean, D, std = self.norm_stats[-2]
+        delta = self.layernorm_backward(delta, x, mean, D, std)
+        direct_delta = delta
+        cross_delta_decoder, deltaencoder = self.crossattentionbackward(delta)
+        delta = direct_delta + cross_delta_decoder
+        x, mean, D, std = self.norm_stats[-3]
+        delta = self.layernorm_backward(delta, x, mean, D, std)
+        direct_delta = delta
+        masked_delta = self.multiheadattentionbackward(delta)
+        deltadecoder = direct_delta + masked_delta
+        return deltadecoder, deltaencoder
+    
 class encoder_decoder():
     def __init__(self, input_matrix, output_matrix):
         self.input_matrix = input_matrix
         self.output_matrix = output_matrix
         self.encoder_layers = []
         self.decoder_layers = []
+
+        self.linear_weights = None
+        self.linear_bias = None
+        self.linear_optimizer = Optimizer()
 
     def softmax(self, x):
         exp = np.exp(x - np.max(x, axis=-1, keepdims=True))
@@ -471,21 +633,34 @@ class encoder_decoder():
     def forwardtraining(self, targettokens, vocab_size):
         x = self.input_matrix
 
-        for i in range(6):
-            encoder = TransformerEncoder(x)
-            x = encoder.forward()
-            self.encoder_layers.append(encoder)
+        if len(self.encoder_layers) == 0:
+            for i in range(6):
+                encoder = TransformerEncoder(x)
+                x = encoder.forward()
+                self.encoder_layers.append(encoder)
+        else:
+            for encoder in self.encoder_layers:
+                encoder.input_matrix = x
+                x = encoder.forward()
 
         y = self.output_matrix
-        for j in range(6):
-            decoder = TransformerDecoder(y, x)
-            y = decoder.decoderforward()
-            self.decoder_layers.append(decoder)
 
-        self.output_matrix = y
+        if len(self.decoder_layers) == 0:
+            for j in range(6):
+                decoder = TransformerDecoder(y, x)
+                y = decoder.decoderforward()
+                self.decoder_layers.append(decoder)
+        else:
+            for decoder in self.decoder_layers:
+                decoder.output_matrix = y
+                decoder.encoder_output = x
+                y = decoder.decoderforward()
 
-        linear_weights = np.random.randn(y.shape[1], vocab_size) * np.sqrt(2 / y.shape[1])
-        logits = np.dot(y, linear_weights)
+        if self.linear_weights is None:
+            self.linear_weights = np.random.randn(y.shape[1], vocab_size) * np.sqrt(2 / y.shape[1])
+            self.linear_bias = np.zeros((1, vocab_size))
+
+        logits = np.dot(y, self.linear_weights) + self.linear_bias
         probs = self.softmax(logits)
 
         loss = self.cross_entropy(probs, targettokens)
@@ -495,30 +670,46 @@ class encoder_decoder():
         dlogits = probs - y_true
 
         dw = np.dot(y.T, dlogits)
-        optimizer = Optimizer()
-        optimizer.optimizer('adam', linear_weights, dw, learning_rate=0.001)
-        delta = np.dot(dlogits, linear_weights.T)
-        deltaencode=np.zeros_like(x)
+        db = np.sum(dlogits, axis=0, keepdims=True)
+        self.linear_weights, self.linear_bias = self.linear_optimizer.optimizer(
+                'adam',
+                self.linear_weights,
+                dw,
+                self.linear_bias,
+                db,
+                learning_rate=0.001
+            )
+        delta = np.dot(dlogits, self.linear_weights.T)
+
+        deltaencode = np.zeros_like(x)
         for i in range(5,-1,-1):
             decoder=self.decoder_layers[i]
-            deltadecoder,deltaencoder=self.decoder_layers[i].backward(delta)
-            deltaencoder+=deltaencoder
-        for j in range(5,-1,-1):
-            encoder=self.encoder_layers[j]
-            deltaencoder=self.encoder_layers[j].backward(deltaencoder)
+            deltadecoder, deltaencoder = decoder.backward(delta)
+            delta = deltadecoder
+            deltaencode += deltaencoder
 
-    def predict(self, sentence):
+        for j in range(5,-1,-1):
+            encoder = self.encoder_layers[j]
+            deltaencode = encoder.backward(deltaencode)
+
+    def predict(self, sentence=None):
         x = self.input_matrix
-        for i in range(6):
-            encoder = TransformerEncoder(x)
+
+        for encoder in self.encoder_layers:
+            encoder.input_matrix = x
             x = encoder.forward()
 
         y = self.output_matrix
-        for j in range(6):
-            decoder = TransformerDecoder(y, x)
+
+        for decoder in self.decoder_layers:
+            decoder.output_matrix = y
+            decoder.encoder_output = x
             y = decoder.decoderforward()
 
-        return y
+        logits = np.dot(y, self.linear_weights) + self.linear_bias
+        probs = self.softmax(logits)
+
+        return probs
 
 
 
