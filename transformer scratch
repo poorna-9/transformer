@@ -100,20 +100,20 @@ class ANN():
 
             if j > 0:
                 delta = np.dot(delta, self.weightdict[j].T)
-    def backprop_from_output(self, dy):
-    delta = dy.copy()
-    for j in range(self.layercount - 1, -1, -1):
-        delta *= self.activationderivative(self.activationvalues[j + 1], self.activations[j])
-        dw = np.dot(self.activationvalues[j].T, delta) / delta.shape[0]
-        db = np.sum(delta, axis=0, keepdims=True) / delta.shape[0]
-
-        self.weightdict[j], self.biasdict[j] = self.opt.optimizer(
-            self.optimizer, self.weightdict[j], dw, self.biasdict[j], db, learning_rate=0.001
-        )
-
-        if j > 0:
-            delta = np.dot(delta, self.weightdict[j].T)
-    return delta  
+    def backprop_from_output(self, dy, learning_rate=0.001):
+        delta = dy.copy()
+        for j in range(self.layercount - 1, -1, -1):
+            delta *= self.activationderivative(self.activationvalues[j + 1], self.activations[j])
+            dw = np.dot(self.activationvalues[j].T, delta) / delta.shape[0]
+            db = np.sum(delta, axis=0, keepdims=True) / delta.shape[0]
+    
+            self.weightdict[j], self.biasdict[j] = self.opt.optimizer(
+                self.optimizer, self.weightdict[j], dw, self.biasdict[j], db, learning_rate=0.001
+            )
+    
+            if j > 0:
+                delta = np.dot(delta, self.weightdict[j].T)
+        return delta  
 
     def fit(self, x, y, epochs, learning_rate):
 
